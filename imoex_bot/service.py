@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from typing import Any, Coroutine, List, Tuple
 
-from telegram import BufferedInputFile, InputMediaPhoto
+from telegram import InputFile, InputMediaPhoto
 from telegram.constants import ParseMode
 from telegram.error import TelegramError
 from telegram.ext import Application, ContextTypes
@@ -132,7 +132,7 @@ class IMOEXBotService:
             placeholder = await self._build_placeholder_chart()
             message = await bot.send_photo(
                 chat_id=chat_id,
-                photo=self._to_buffered_input_file(placeholder),
+                photo=self._to_input_file(placeholder),
                 caption="Обновляю график…",
             )
             state.chart_message_id = message.message_id
@@ -247,7 +247,7 @@ class IMOEXBotService:
 
         chart = await asyncio.to_thread(build_chart, recent_points)
         media = InputMediaPhoto(
-            media=self._to_buffered_input_file(chart),
+            media=self._to_input_file(chart),
             caption=self._build_chart_caption(recent_points),
         )
         try:
@@ -260,10 +260,10 @@ class IMOEXBotService:
             logger.exception("Failed to edit chart message")
 
     @staticmethod
-    def _to_buffered_input_file(buffer: BytesIO) -> BufferedInputFile:
+    def _to_input_file(buffer: BytesIO) -> InputFile:
         buffer.seek(0)
         data = buffer.getvalue()
-        return BufferedInputFile(data, filename="imoex_chart.png")
+        return InputFile(data, filename="imoex_chart.png")
 
     def _build_chart_caption(self, points: List[Tuple[datetime, float]]) -> str:
         start_time = points[0][0].astimezone(MOSCOW_TZ)
