@@ -17,6 +17,14 @@ class Candle:
     close: float
 
 
+@dataclass(slots=True)
+class DaySummary:
+    open: float
+    high: float
+    low: float
+    close: float
+
+
 class IMOEXFetcher:
     BASE_URL = "https://iss.moex.com/iss"
 
@@ -125,6 +133,95 @@ class IMOEXFetcher:
 
         return timestamp, float(last_value)
 
+    def fetch_day_summary(self) -> DaySummary:
+        url = f"{self.BASE_URL}/engines/stock/markets/index/boards/{self.board}/securities.json"
+        params = {"securities": self.security, "iss.meta": "off"}
+        response = self._session.get(url, params=params, timeout=10)
+        response.raise_for_status()
+        payload = response.json()
+
+        columns = payload["marketdata"]["columns"]
+        data_rows = payload["marketdata"]["data"]
+        if not data_rows:
+            raise RuntimeError("No market data received from MOEX ISS")
+
+        secid_idx, _ = self._find_column_index(columns, ["SECID"])
+        last_idx, last_column = self._find_column_index(
+            columns,
+            [
+                "LAST",
+                "LASTVALUE",
+                "CURRENTVALUE",
+                "LASTPRICE",
+                "VALUE",
+            ],
+        )
+        open_idx, open_column = self._find_column_index(
+            columns,
+            ["OPEN", "OPENVALUE", "OPENVALUE_RUR", "FIRST"],
+            required=False,
+        )
+        high_idx, high_column = self._find_column_index(
+            columns,
+            ["HIGH", "HIGHVALUE", "HIGHPRICE"],
+            required=False,
+        )
+        low_idx, low_column = self._find_column_index(
+            columns,
+            ["LOW", "LOWVALUE", "LOWPRICE"],
+            required=False,
+        )
+
+        matching_rows: Iterable[List] = (
+            row for row in data_rows if row[secid_idx] == self.security
+        )
+        try:
+            row = next(iter(matching_rows))
+        except StopIteration as exc:
+            raise RuntimeError(f"Security {self.security} not found in response") from exc
+
+        def _pick_value(idx: Optional[int], column_name: Optional[str]) -> float:
+            if idx is None:
+                raise RuntimeError(
+                    "Unexpected response structure from MOEX ISS: missing "
+                    f"{column_name or 'value'} column"
+                )
+            value = row[idx]
+            if value is None:
+                raise RuntimeError(
+                    f"{column_name or 'value'} value is missing in ISS response"
+                )
+            try:
+                return float(value)
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError(
+                    f"{column_name or 'value'} value is not a number in ISS response"
+                ) from exc
+
+        last_value = _pick_value(last_idx, last_column)
+
+        try:
+            open_value = _pick_value(open_idx, open_column)
+        except RuntimeError:
+            open_value = last_value
+
+        try:
+            high_value = _pick_value(high_idx, high_column)
+        except RuntimeError:
+            high_value = last_value
+
+        try:
+            low_value = _pick_value(low_idx, low_column)
+        except RuntimeError:
+            low_value = last_value
+
+        return DaySummary(
+            open=open_value,
+            high=high_value,
+            low=low_value,
+            close=last_value,
+        )
+
     def fetch_candles(
         self, start: datetime, end: datetime, interval: int = 1
     ) -> List[Candle]:
@@ -179,4 +276,4 @@ class IMOEXFetcher:
         ]
 
 
-__all__ = ["IMOEXFetcher", "Candle", "MOSCOW_TZ"]
+__all__ = ["IMOEXFetcher", "Candle", "DaySummary", "MOSCOW_TZ"]

@@ -4,14 +4,15 @@ import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 from io import BytesIO
-from typing import Any, Coroutine, List, Tuple
+from typing import Any, Coroutine, Dict, Iterable, List, Tuple
 
-from aiogram import Bot
+from aiogram import Bot, Dispatcher
 from aiogram.exceptions import TelegramAPIError
-from aiogram.types import BufferedInputFile, InputMediaPhoto
+from aiogram.filters import CommandStart
+from aiogram.types import BufferedInputFile, InputMediaPhoto, Message
 
 from .config import Settings
-from .data_fetcher import IMOEXFetcher
+from .data_fetcher import DaySummary, IMOEXFetcher, MOSCOW_TZ
 from .graph import build_chart
 from .state import StateStorage
 
@@ -27,13 +28,13 @@ class IMOEXBotService:
         self._alert_lock = asyncio.Lock()
         self._background_tasks: set[asyncio.Task[None]] = set()
         self._alert_history: List[Tuple[datetime, float]] = []
-        self._last_price_text: str | None = None
+        self._last_price_text: Dict[int, str] = {}
+
+    def register_handlers(self, dispatcher: Dispatcher) -> None:
+        dispatcher.message.register(self._handle_start, CommandStart())
 
     async def on_startup(self, bot: Bot) -> None:
         await self._prepare_history()
-        await self._ensure_messages(bot)
-        await self._update_price_message("⏳ Инициализация…", bot)
-        await self._update_chart_message(bot)
 
         self._start_background_task(
             self._background_price_loop(bot), "price-updater"
@@ -50,6 +51,27 @@ class IMOEXBotService:
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         self._background_tasks.clear()
+
+    async def _handle_start(self, message: Message, bot: Bot) -> None:
+        chat_id = message.chat.id
+
+        async with self._lock:
+            self.storage.state.ensure_chat(chat_id)
+            await self._ensure_chat_messages(chat_id, bot)
+            last_point = self.storage.state.last_point()
+
+        await message.answer(
+            "Привет! Я буду присылать обновления индекса и свежий график в этом чате."
+        )
+
+        if last_point is not None:
+            timestamp, value = last_point
+            await self._update_price_messages(
+                self._format_price_message(timestamp, value),
+                bot,
+                chat_ids=[chat_id],
+            )
+            await self._update_chart_messages(bot, chat_ids=[chat_id])
 
     async def _prepare_history(self) -> None:
         state = self.storage.state
@@ -73,82 +95,78 @@ class IMOEXBotService:
         self.storage.save()
         logger.info("Fetched %d historical candles", len(candles))
 
-    async def _ensure_messages(self, bot: Bot) -> None:
-        state = self.storage.state
-        chat_id = self.settings.chat_id
+    async def _ensure_chat_messages(self, chat_id: int, bot: Bot) -> None:
+        chat_state = self.storage.state.ensure_chat(chat_id)
+        placeholder_text = "♻️ Перезапуск отслеживания…"
 
-        if state.price_message_id is not None:
+        price_message_id = chat_state.price_message_id
+        need_new_price_message = price_message_id is None
+        if price_message_id is not None:
             try:
                 await bot.edit_message_text(
                     chat_id=chat_id,
-                    message_id=state.price_message_id,
-                    text="♻️ Перезапуск отслеживания…",
+                    message_id=price_message_id,
+                    text=placeholder_text,
                 )
-                self._last_price_text = "♻️ Перезапуск отслеживания…"
+                self._last_price_text[chat_id] = placeholder_text
             except TelegramAPIError:
                 logger.warning(
-                    "Stored price message is not accessible, creating new one"
+                    "Stored price message for chat %s is not accessible, creating new one",
+                    chat_id,
                 )
-                state.price_message_id = None
+                need_new_price_message = True
 
-        if state.price_message_id is None:
-            message = await bot.send_message(
-                chat_id=chat_id,
-                text="♻️ Перезапуск отслеживания…",
-            )
-            state.price_message_id = message.message_id
-            await self._pin_message(bot, chat_id, message.message_id)
-            self.storage.save()
-            self._last_price_text = "♻️ Перезапуск отслеживания…"
-
-        if state.chart_message_id is not None:
+        if need_new_price_message:
             try:
-                await bot.edit_message_caption(
+                message = await bot.send_message(
+                    chat_id=chat_id, text=placeholder_text
+                )
+            except TelegramAPIError:
+                logger.exception(
+                    "Failed to create price placeholder message for chat %s", chat_id
+                )
+            else:
+                chat_state.price_message_id = message.message_id
+                self._last_price_text[chat_id] = placeholder_text
+
+        placeholder_chart = await self._build_placeholder_chart()
+        chart_bytes = placeholder_chart.getvalue()
+        chart_caption = "Обновляю график…"
+
+        chart_message_id = chat_state.chart_message_id
+        need_new_chart_message = chart_message_id is None
+        if chart_message_id is not None:
+            try:
+                await bot.edit_message_media(
                     chat_id=chat_id,
-                    message_id=state.chart_message_id,
-                    caption="Обновляю график…",
+                    message_id=chart_message_id,
+                    media=InputMediaPhoto(
+                        media=self._buffer_to_input_file(chart_bytes),
+                        caption=chart_caption,
+                    ),
                 )
             except TelegramAPIError:
                 logger.warning(
-                    "Stored chart message is not accessible, creating new one"
+                    "Stored chart message for chat %s is not accessible, creating new one",
+                    chat_id,
                 )
-                state.chart_message_id = None
+                need_new_chart_message = True
 
-        if state.chart_message_id is None:
-            placeholder = await self._build_placeholder_chart()
-            message = await bot.send_photo(
-                chat_id=chat_id,
-                photo=self._to_input_file(placeholder),
-                caption="Обновляю график…",
-            )
-            state.chart_message_id = message.message_id
-            await self._pin_message(bot, chat_id, message.message_id)
-            self.storage.save()
+        if need_new_chart_message:
+            try:
+                message = await bot.send_photo(
+                    chat_id=chat_id,
+                    photo=self._buffer_to_input_file(chart_bytes),
+                    caption=chart_caption,
+                )
+            except TelegramAPIError:
+                logger.exception(
+                    "Failed to create chart placeholder for chat %s", chat_id
+                )
+            else:
+                chat_state.chart_message_id = message.message_id
 
-    async def _build_placeholder_chart(self) -> BytesIO:
-        points = list(self.storage.state.iter_points())
-        if not points:
-            now = datetime.now(timezone.utc)
-            points = [(now - timedelta(minutes=5), 0.0), (now, 0.0)]
-        else:
-            last_ts, last_value = points[-1]
-            start_ts = max(points[0][0], last_ts - timedelta(minutes=5))
-            points = [
-                (ts, value)
-                for ts, value in points
-                if start_ts <= ts <= last_ts
-            ] or [(last_ts - timedelta(minutes=5), last_value), (last_ts, last_value)]
-        return await asyncio.to_thread(build_chart, points)
-
-    async def _pin_message(self, bot: Bot, chat_id: int, message_id: int) -> None:
-        try:
-            await bot.pin_chat_message(
-                chat_id=chat_id,
-                message_id=message_id,
-                disable_notification=True,
-            )
-        except TelegramAPIError:
-            logger.exception("Failed to pin message %s", message_id)
+        self.storage.save()
 
     def _start_background_task(self, coro: Coroutine[Any, Any, None], name: str) -> None:
         task = asyncio.create_task(coro, name=name)
@@ -171,7 +189,6 @@ class IMOEXBotService:
             await asyncio.sleep(self.settings.price_update_interval)
 
     async def _background_chart_loop(self, bot: Bot) -> None:
-        # Start updates only after the first interval to mimic job queue behaviour
         await asyncio.sleep(self.settings.chart_update_interval)
         while True:
             await self._perform_chart_update(bot)
@@ -190,7 +207,7 @@ class IMOEXBotService:
             state.prune_history(timedelta(hours=6))
             self.storage.save()
 
-            await self._update_price_message(
+            await self._update_price_messages(
                 self._format_price_message(timestamp, value), bot
             )
             await self._handle_alert(timestamp, value, bot)
@@ -198,59 +215,152 @@ class IMOEXBotService:
     async def _perform_chart_update(self, bot: Bot) -> None:
         async with self._lock:
             try:
-                await self._update_chart_message(bot)
+                await self._update_chart_messages(bot)
             except Exception:
-                logger.exception("Failed to update chart message")
+                logger.exception("Failed to update chart messages")
 
-    async def _update_price_message(self, text: str, bot: Bot) -> None:
-        message_id = self.storage.state.price_message_id
-        if message_id is None:
-            return
-        if text == self._last_price_text:
-            return
-        try:
-            await bot.edit_message_text(
-                chat_id=self.settings.chat_id,
-                message_id=message_id,
-                text=text,
-            )
-            self._last_price_text = text
-        except TelegramAPIError:
-            logger.exception("Failed to edit price message")
-
-    async def _update_chart_message(self, bot: Bot) -> None:
+    async def _update_price_messages(
+        self, text: str, bot: Bot, *, chat_ids: Iterable[int] | None = None
+    ) -> None:
         state = self.storage.state
-        message_id = state.chart_message_id
-        if message_id is None:
-            return
+        targets = (
+            ((chat_id, state.ensure_chat(chat_id)) for chat_id in chat_ids)
+            if chat_ids is not None
+            else state.iter_chats()
+        )
 
+        updated = False
+        for chat_id, chat_state in targets:
+            message_id = chat_state.price_message_id
+            if message_id is None:
+                try:
+                    message = await bot.send_message(chat_id=chat_id, text=text)
+                except TelegramAPIError:
+                    logger.exception(
+                        "Failed to send price message to chat %s", chat_id
+                    )
+                    continue
+                chat_state.price_message_id = message.message_id
+                self._last_price_text[chat_id] = text
+                updated = True
+                continue
+
+            if self._last_price_text.get(chat_id) == text:
+                continue
+
+            try:
+                await bot.edit_message_text(
+                    chat_id=chat_id, message_id=message_id, text=text
+                )
+            except TelegramAPIError:
+                logger.exception("Failed to edit price message for chat %s", chat_id)
+                try:
+                    message = await bot.send_message(chat_id=chat_id, text=text)
+                except TelegramAPIError:
+                    logger.exception(
+                        "Failed to resend price message to chat %s", chat_id
+                    )
+                    continue
+                chat_state.price_message_id = message.message_id
+            self._last_price_text[chat_id] = text
+            updated = True
+
+        if updated:
+            self.storage.save()
+
+    async def _update_chart_messages(
+        self, bot: Bot, *, chat_ids: Iterable[int] | None = None
+    ) -> None:
+        state = self.storage.state
         points = list(state.iter_points())
         if not points:
             return
+
         cutoff = datetime.now(timezone.utc) - timedelta(hours=5)
         recent_points = [(ts, value) for ts, value in points if ts >= cutoff]
         if not recent_points:
             recent_points = points[-2:]
 
-        chart = await asyncio.to_thread(build_chart, recent_points)
-        media = InputMediaPhoto(
-            media=self._to_input_file(chart),
-            caption=self._build_chart_caption(recent_points),
-        )
+        summary: DaySummary | None = None
         try:
-            await bot.edit_message_media(
-                chat_id=self.settings.chat_id,
-                message_id=message_id,
-                media=media,
+            summary = await asyncio.to_thread(self.fetcher.fetch_day_summary)
+        except Exception:
+            logger.warning("Failed to fetch day summary for chart", exc_info=True)
+
+        chart_buffer = await asyncio.to_thread(build_chart, recent_points, summary)
+        chart_bytes = chart_buffer.getvalue()
+        caption = self._build_chart_caption(recent_points)
+
+        targets = (
+            ((chat_id, state.ensure_chat(chat_id)) for chat_id in chat_ids)
+            if chat_ids is not None
+            else state.iter_chats()
+        )
+
+        updated = False
+        for chat_id, chat_state in targets:
+            message_id = chat_state.chart_message_id
+            media = InputMediaPhoto(
+                media=self._buffer_to_input_file(chart_bytes), caption=caption
             )
-        except TelegramAPIError:
-            logger.exception("Failed to edit chart message")
+
+            if message_id is None:
+                try:
+                    message = await bot.send_photo(
+                        chat_id=chat_id,
+                        photo=self._buffer_to_input_file(chart_bytes),
+                        caption=caption,
+                    )
+                except TelegramAPIError:
+                    logger.exception(
+                        "Failed to send chart message to chat %s", chat_id
+                    )
+                    continue
+                chat_state.chart_message_id = message.message_id
+                updated = True
+                continue
+
+            try:
+                await bot.edit_message_media(
+                    chat_id=chat_id, message_id=message_id, media=media
+                )
+            except TelegramAPIError:
+                logger.exception("Failed to edit chart message for chat %s", chat_id)
+                try:
+                    message = await bot.send_photo(
+                        chat_id=chat_id,
+                        photo=self._buffer_to_input_file(chart_bytes),
+                        caption=caption,
+                    )
+                except TelegramAPIError:
+                    logger.exception(
+                        "Failed to resend chart message to chat %s", chat_id
+                    )
+                    continue
+                chat_state.chart_message_id = message.message_id
+            updated = True
+
+        if updated:
+            self.storage.save()
 
     @staticmethod
-    def _to_input_file(buffer: BytesIO) -> BufferedInputFile:
-        buffer.seek(0)
-        data = buffer.read()
+    def _buffer_to_input_file(data: bytes) -> BufferedInputFile:
         return BufferedInputFile(data, filename="imoex_chart.png")
+
+    async def _build_placeholder_chart(self) -> BytesIO:
+        points = list(self.storage.state.iter_points())
+        if not points:
+            now = datetime.now(timezone.utc)
+            points = [(now - timedelta(minutes=5), 0.0), (now, 0.0)]
+        else:
+            last_ts, last_value = points[-1]
+            start_ts = max(points[0][0], last_ts - timedelta(minutes=5))
+            points = [
+                (ts, value)
+                for ts, value in points
+                if start_ts <= ts <= last_ts
+            ] or [(last_ts - timedelta(minutes=5), last_value), (last_ts, last_value)]
+        return await asyncio.to_thread(build_chart, points)
 
     def _build_chart_caption(self, points: List[Tuple[datetime, float]]) -> str:
         start_time = points[0][0].astimezone(MOSCOW_TZ)
@@ -297,29 +407,35 @@ class IMOEXBotService:
 
             direction = "Рост" if diff > 0 else "Падение"
             arrow = "🚀" if diff > 0 else "📉"
-            message = await bot.send_message(
-                chat_id=self.settings.chat_id,
-                text=(
-                    f"{arrow} {direction} индекса на {diff:+.2f} пунктов за минуту!\n"
-                    f"Текущее значение: {value:.2f}"
-                ),
+            text = (
+                f"{arrow} {direction} индекса на {diff:+.2f} пунктов за минуту!\n"
+                f"Текущее значение: {value:.2f}"
             )
-            self._start_background_task(
-                self._delete_message_later(bot, message.message_id),
-                f"delete-alert-{message.message_id}",
-            )
+
+            for chat_id, chat_state in list(self.storage.state.iter_chats()):
+                try:
+                    message = await bot.send_message(chat_id=chat_id, text=text)
+                except TelegramAPIError:
+                    logger.exception(
+                        "Failed to send alert message to chat %s", chat_id
+                    )
+                    continue
+                self._start_background_task(
+                    self._delete_message_later(bot, chat_id, message.message_id),
+                    f"delete-alert-{chat_id}-{message.message_id}",
+                )
             self._alert_history.clear()
 
-    async def _delete_message_later(self, bot: Bot, message_id: int) -> None:
+    async def _delete_message_later(
+        self, bot: Bot, chat_id: int, message_id: int
+    ) -> None:
         await asyncio.sleep(3600)
         try:
-            await bot.delete_message(
-                chat_id=self.settings.chat_id, message_id=message_id
-            )
+            await bot.delete_message(chat_id=chat_id, message_id=message_id)
         except TelegramAPIError:
-            logger.warning("Failed to delete alert message %s", message_id)
+            logger.warning(
+                "Failed to delete alert message %s in chat %s", message_id, chat_id
+            )
 
-
-from .data_fetcher import MOSCOW_TZ  # noqa: E402
 
 __all__ = ["IMOEXBotService"]
