@@ -90,9 +90,9 @@ class IMOEXFetcher:
         last_idx, last_column = self._find_column_index(
             columns,
             [
+                "CURRENTVALUE",
                 "LAST",
                 "LASTVALUE",
-                "CURRENTVALUE",
                 "LASTPRICE",
                 "VALUE",
             ],
@@ -151,9 +151,9 @@ class IMOEXFetcher:
         last_idx, last_column = self._find_column_index(
             columns,
             [
+                "CURRENTVALUE",
                 "LAST",
                 "LASTVALUE",
-                "CURRENTVALUE",
                 "LASTPRICE",
                 "VALUE",
             ],
