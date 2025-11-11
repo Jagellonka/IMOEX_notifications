@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from io import BytesIO
 from typing import Any, Coroutine, Dict, Iterable, List, Tuple
 
@@ -80,7 +80,7 @@ class IMOEXBotService:
             logger.info("Loaded %d history points from state", len(state.history))
             return
 
-        end_time = datetime.now(timezone.utc)
+        end_time = datetime.now(MOSCOW_TZ)
         start_time = end_time - timedelta(hours=5)
         try:
             candles = await asyncio.to_thread(
@@ -276,7 +276,7 @@ class IMOEXBotService:
         if not points:
             return
 
-        cutoff = datetime.now(timezone.utc) - timedelta(hours=5)
+        cutoff = datetime.now(MOSCOW_TZ) - timedelta(hours=5)
         recent_points = [(ts, value) for ts, value in points if ts >= cutoff]
         if not recent_points:
             recent_points = points[-2:]
@@ -350,7 +350,7 @@ class IMOEXBotService:
     async def _build_placeholder_chart(self) -> BytesIO:
         points = list(self.storage.state.iter_points())
         if not points:
-            now = datetime.now(timezone.utc)
+            now = datetime.now(MOSCOW_TZ)
             points = [(now - timedelta(minutes=5), 0.0), (now, 0.0)]
         else:
             last_ts, last_value = points[-1]
