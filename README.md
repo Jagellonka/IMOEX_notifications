@@ -50,7 +50,7 @@ python bot.py
    sudo -iu imoexbot
    mkdir -p ~/apps
    cd ~/apps
-   git clone <адрес_репозитория> imoex_notifications
+   git clone https://github.com/Jagellonka/IMOEX_notifications.git imoex_notifications
    cd imoex_notifications
    ```
 
