@@ -5,6 +5,7 @@ import logging
 import sys
 
 from aiogram import Bot, Dispatcher
+from aiogram.client.bot import DefaultBotProperties
 from aiogram.enums import ParseMode
 
 from imoex_bot.config import Settings, SettingsError
@@ -14,7 +15,10 @@ from imoex_bot.service import IMOEXBotService
 async def _run_bot(settings: Settings) -> None:
     service = IMOEXBotService(settings)
 
-    bot = Bot(token=settings.bot_token, parse_mode=ParseMode.HTML)
+    bot = Bot(
+        token=settings.bot_token,
+        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+    )
     dp = Dispatcher()
 
     dp.startup.register(service.on_startup)
