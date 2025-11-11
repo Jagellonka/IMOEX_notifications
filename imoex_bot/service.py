@@ -28,6 +28,7 @@ class IMOEXBotService:
         self._alert_lock = asyncio.Lock()
         self._background_tasks: list[asyncio.Task[None]] = []
         self._alert_history: List[Tuple[datetime, float]] = []
+        self._last_price_text: str | None = None
 
     async def post_init(self, application: Application) -> None:
         await self._prepare_history()
@@ -104,6 +105,7 @@ class IMOEXBotService:
                     message_id=state.price_message_id,
                     text="♻️ Перезапуск отслеживания…",
                 )
+                self._last_price_text = "♻️ Перезапуск отслеживания…"
             except TelegramError:
                 logger.warning("Stored price message is not accessible, creating new one")
                 state.price_message_id = None
@@ -116,6 +118,7 @@ class IMOEXBotService:
             state.price_message_id = message.message_id
             await self._pin_message(bot, chat_id, message.message_id)
             self.storage.save()
+            self._last_price_text = "♻️ Перезапуск отслеживания…"
 
         if state.chart_message_id is not None:
             try:
@@ -221,6 +224,8 @@ class IMOEXBotService:
         message_id = self.storage.state.price_message_id
         if message_id is None:
             return
+        if text == self._last_price_text:
+            return
         try:
             await application.bot.edit_message_text(
                 chat_id=self.settings.chat_id,
@@ -228,6 +233,7 @@ class IMOEXBotService:
                 text=text,
                 parse_mode=ParseMode.HTML,
             )
+            self._last_price_text = text
         except TelegramError:
             logger.exception("Failed to edit price message")
 
