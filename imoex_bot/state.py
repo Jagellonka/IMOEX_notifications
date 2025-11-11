@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, Iterable, List, Tuple
 
+from zoneinfo import ZoneInfo
+
+
+MOSCOW_TZ = ZoneInfo("Europe/Moscow")
 
 @dataclass
 class ChatState:
@@ -19,7 +23,7 @@ class BotState:
     chats: Dict[int, ChatState] = field(default_factory=dict)
 
     def prune_history(self, max_age: timedelta) -> None:
-        cutoff = datetime.now(timezone.utc) - max_age
+        cutoff = datetime.now(MOSCOW_TZ) - max_age
         self.history = [
             (ts_str, value)
             for ts_str, value in self.history
@@ -27,7 +31,7 @@ class BotState:
         ]
 
     def append_history_point(self, timestamp: datetime, value: float) -> None:
-        aware_ts = timestamp.astimezone(timezone.utc)
+        aware_ts = timestamp.astimezone(MOSCOW_TZ)
         iso_value = aware_ts.isoformat()
         if self.history and self.history[-1][0] == iso_value:
             self.history[-1] = (iso_value, value)
@@ -63,8 +67,8 @@ class BotState:
     def _to_datetime(ts_str: str) -> datetime:
         dt = datetime.fromisoformat(ts_str)
         if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        return dt.astimezone(timezone.utc)
+            dt = dt.replace(tzinfo=MOSCOW_TZ)
+        return dt.astimezone(MOSCOW_TZ)
 
 
 class StateStorage:

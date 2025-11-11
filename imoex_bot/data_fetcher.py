@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from typing import Iterable, List, Optional, Sequence, Tuple
 
 import requests
@@ -9,7 +9,6 @@ from zoneinfo import ZoneInfo
 
 
 MOSCOW_TZ = ZoneInfo("Europe/Moscow")
-UTC_TZ = timezone.utc
 
 
 @dataclass(slots=True)
@@ -55,7 +54,7 @@ class IMOEXFetcher:
         return None, None
 
     @staticmethod
-    def _to_utc_timestamp(value: object) -> datetime:
+    def _to_moscow_timestamp(value: object) -> datetime:
         if isinstance(value, datetime):
             dt = value
         elif isinstance(value, str) and value.strip():
@@ -73,7 +72,7 @@ class IMOEXFetcher:
             dt = dt.replace(tzinfo=MOSCOW_TZ)
         else:
             dt = dt.astimezone(MOSCOW_TZ)
-        return dt.astimezone(UTC_TZ)
+        return dt
 
     def fetch_last_value(self) -> Tuple[datetime, float]:
         url = f"{self.BASE_URL}/engines/stock/markets/index/boards/{self.board}/securities.json"
@@ -127,12 +126,12 @@ class IMOEXFetcher:
             )
 
         if systime_raw in (None, ""):
-            timestamp = datetime.now(timezone.utc)
+            timestamp = datetime.now(MOSCOW_TZ)
         else:
             try:
-                timestamp = self._to_utc_timestamp(systime_raw)
+                timestamp = self._to_moscow_timestamp(systime_raw)
             except RuntimeError:
-                timestamp = datetime.now(timezone.utc)
+                timestamp = datetime.now(MOSCOW_TZ)
 
         return timestamp, float(last_value)
 
@@ -234,8 +233,10 @@ class IMOEXFetcher:
 
         def to_param(dt: datetime) -> str:
             if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
-            return dt.astimezone(MOSCOW_TZ).strftime("%Y-%m-%d %H:%M:%S")
+                dt = dt.replace(tzinfo=MOSCOW_TZ)
+            else:
+                dt = dt.astimezone(MOSCOW_TZ)
+            return dt.strftime("%Y-%m-%d %H:%M:%S")
 
         params = {
             "from": to_param(start),
@@ -267,7 +268,6 @@ class IMOEXFetcher:
                     ts = ts.replace(tzinfo=MOSCOW_TZ)
                 else:
                     ts = ts.astimezone(MOSCOW_TZ)
-                ts = ts.astimezone(UTC_TZ)
                 close = float(row[close_idx])
                 candles.append(Candle(timestamp=ts, close=close))
 
