@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from io import BytesIO
 from typing import Sequence, Tuple
 
@@ -10,10 +10,11 @@ import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 from matplotlib.axes import Axes
+from zoneinfo import ZoneInfo
 
 from .data_fetcher import DaySummary
 
-MOSCOW_TZ = timezone(timedelta(hours=3))
+MOSCOW_TZ = ZoneInfo("Europe/Moscow")
 
 
 def build_chart(
@@ -37,7 +38,7 @@ def build_chart(
     ax.set_ylabel("Значение индекса")
     ax.grid(True, linestyle="--", alpha=0.4)
 
-    ax.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M", tz=MOSCOW_TZ))
     ax.xaxis.set_major_locator(mdates.AutoDateLocator(maxticks=8))
     fig.autofmt_xdate()
     if summary is not None:
