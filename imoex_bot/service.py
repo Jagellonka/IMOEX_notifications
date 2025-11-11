@@ -7,7 +7,6 @@ from io import BytesIO
 from typing import Any, Coroutine, List, Tuple
 
 from aiogram import Bot
-from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramAPIError
 from aiogram.types import BufferedInputFile, InputMediaPhoto
 
@@ -214,7 +213,6 @@ class IMOEXBotService:
                 chat_id=self.settings.chat_id,
                 message_id=message_id,
                 text=text,
-                parse_mode=ParseMode.HTML,
             )
             self._last_price_text = text
         except TelegramAPIError:
