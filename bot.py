@@ -20,6 +20,7 @@ async def _run_bot(settings: Settings) -> None:
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
     dp = Dispatcher()
+    service.register_handlers(dp)
 
     dp.startup.register(service.on_startup)
     dp.shutdown.register(service.on_shutdown)

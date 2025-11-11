@@ -4,14 +4,19 @@ import json
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Iterable, List, Tuple
+from typing import Dict, Iterable, List, Tuple
+
+
+@dataclass
+class ChatState:
+    price_message_id: int | None = None
+    chart_message_id: int | None = None
 
 
 @dataclass
 class BotState:
-    price_message_id: int | None = None
-    chart_message_id: int | None = None
     history: List[Tuple[str, float]] = field(default_factory=list)
+    chats: Dict[int, ChatState] = field(default_factory=dict)
 
     def prune_history(self, max_age: timedelta) -> None:
         cutoff = datetime.now(timezone.utc) - max_age
@@ -34,9 +39,25 @@ class BotState:
             return None
         return self.history[-1][1]
 
+    def last_point(self) -> Tuple[datetime, float] | None:
+        if not self.history:
+            return None
+        ts_str, value = self.history[-1]
+        return self._to_datetime(ts_str), value
+
     def iter_points(self) -> Iterable[Tuple[datetime, float]]:
         for ts_str, value in self.history:
             yield self._to_datetime(ts_str), value
+
+    def ensure_chat(self, chat_id: int) -> ChatState:
+        chat = self.chats.get(chat_id)
+        if chat is None:
+            chat = ChatState()
+            self.chats[chat_id] = chat
+        return chat
+
+    def iter_chats(self) -> Iterable[Tuple[int, ChatState]]:
+        return self.chats.items()
 
     @staticmethod
     def _to_datetime(ts_str: str) -> datetime:
@@ -79,21 +100,37 @@ class StateStorage:
                 continue
             history.append((ts, float(value)))
 
-        self._state = BotState(
-            price_message_id=raw.get("price_message_id"),
-            chart_message_id=raw.get("chart_message_id"),
-            history=history,
-        )
+        chats: Dict[int, ChatState] = {}
+        chats_raw = raw.get("chats")
+        if isinstance(chats_raw, dict):
+            for chat_id_raw, payload in chats_raw.items():
+                try:
+                    chat_id = int(chat_id_raw)
+                except (TypeError, ValueError):
+                    continue
+                if not isinstance(payload, dict):
+                    continue
+                chats[chat_id] = ChatState(
+                    price_message_id=payload.get("price_message_id"),
+                    chart_message_id=payload.get("chart_message_id"),
+                )
+
+        self._state = BotState(history=history, chats=chats)
 
     def save(self) -> None:
         data = {
-            "price_message_id": self._state.price_message_id,
-            "chart_message_id": self._state.chart_message_id,
             "history": self._state.history,
+            "chats": {
+                str(chat_id): {
+                    "price_message_id": chat.price_message_id,
+                    "chart_message_id": chat.chart_message_id,
+                }
+                for chat_id, chat in self._state.chats.items()
+            },
         }
         self._path.parent.mkdir(parents=True, exist_ok=True)
         with self._path.open("w", encoding="utf-8") as fp:
             json.dump(data, fp, ensure_ascii=False, indent=2)
 
 
-__all__ = ["BotState", "StateStorage"]
+__all__ = ["BotState", "ChatState", "StateStorage"]
