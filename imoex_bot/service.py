@@ -6,10 +6,10 @@ from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from typing import Any, Coroutine, List, Tuple
 
-from telegram import BufferedInputFile, InputMediaPhoto
-from telegram.constants import ParseMode
-from telegram.error import TelegramError
-from telegram.ext import Application, ContextTypes
+from aiogram import Bot
+from aiogram.enums import ParseMode
+from aiogram.exceptions import TelegramAPIError
+from aiogram.types import BufferedInputFile, InputMediaPhoto
 
 from .config import Settings
 from .data_fetcher import IMOEXFetcher
@@ -26,49 +26,30 @@ class IMOEXBotService:
         self.fetcher = IMOEXFetcher(settings.board, settings.security)
         self._lock = asyncio.Lock()
         self._alert_lock = asyncio.Lock()
-        self._background_tasks: list[asyncio.Task[None]] = []
+        self._background_tasks: set[asyncio.Task[None]] = set()
         self._alert_history: List[Tuple[datetime, float]] = []
         self._last_price_text: str | None = None
 
-    async def post_init(self, application: Application) -> None:
+    async def on_startup(self, bot: Bot) -> None:
         await self._prepare_history()
-        await self._ensure_messages(application)
-        await self._update_price_message(
-            "⏳ Инициализация…", application
+        await self._ensure_messages(bot)
+        await self._update_price_message("⏳ Инициализация…", bot)
+        await self._update_chart_message(bot)
+
+        self._start_background_task(
+            self._background_price_loop(bot), "price-updater"
         )
-        await self._update_chart_message(application)
+        self._start_background_task(
+            self._background_chart_loop(bot), "chart-updater"
+        )
 
-        job_queue = application.job_queue
-        if job_queue is not None:
-            job_queue.run_repeating(
-                self._price_job,
-                interval=self.settings.price_update_interval,
-                first=0.0,
-                name="price-updater",
-            )
-            job_queue.run_repeating(
-                self._chart_job,
-                interval=self.settings.chart_update_interval,
-                first=self.settings.chart_update_interval,
-                name="chart-updater",
-            )
-        else:
-            logger.warning(
-                "Job queue is not available. Falling back to asyncio tasks for updates."
-            )
-            self._start_background_task(
-                self._background_price_loop(application), "price-updater"
-            )
-            self._start_background_task(
-                self._background_chart_loop(application), "chart-updater"
-            )
-
-    async def post_shutdown(self, application: Application) -> None:  # pragma: no cover
+    async def on_shutdown(self, bot: Bot) -> None:  # pragma: no cover
         self.storage.save()
-        for task in self._background_tasks:
+        tasks = list(self._background_tasks)
+        for task in tasks:
             task.cancel()
-        if self._background_tasks:
-            await asyncio.gather(*self._background_tasks, return_exceptions=True)
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
         self._background_tasks.clear()
 
     async def _prepare_history(self) -> None:
@@ -93,9 +74,8 @@ class IMOEXBotService:
         self.storage.save()
         logger.info("Fetched %d historical candles", len(candles))
 
-    async def _ensure_messages(self, application: Application) -> None:
+    async def _ensure_messages(self, bot: Bot) -> None:
         state = self.storage.state
-        bot = application.bot
         chat_id = self.settings.chat_id
 
         if state.price_message_id is not None:
@@ -106,8 +86,10 @@ class IMOEXBotService:
                     text="♻️ Перезапуск отслеживания…",
                 )
                 self._last_price_text = "♻️ Перезапуск отслеживания…"
-            except TelegramError:
-                logger.warning("Stored price message is not accessible, creating new one")
+            except TelegramAPIError:
+                logger.warning(
+                    "Stored price message is not accessible, creating new one"
+                )
                 state.price_message_id = None
 
         if state.price_message_id is None:
@@ -127,8 +109,10 @@ class IMOEXBotService:
                     message_id=state.chart_message_id,
                     caption="Обновляю график…",
                 )
-            except TelegramError:
-                logger.warning("Stored chart message is not accessible, creating new one")
+            except TelegramAPIError:
+                logger.warning(
+                    "Stored chart message is not accessible, creating new one"
+                )
                 state.chart_message_id = None
 
         if state.chart_message_id is None:
@@ -157,17 +141,22 @@ class IMOEXBotService:
             ] or [(last_ts - timedelta(minutes=5), last_value), (last_ts, last_value)]
         return await asyncio.to_thread(build_chart, points)
 
-    async def _pin_message(self, bot, chat_id: int, message_id: int) -> None:
+    async def _pin_message(self, bot: Bot, chat_id: int, message_id: int) -> None:
         try:
-            await bot.pin_chat_message(chat_id=chat_id, message_id=message_id, disable_notification=True)
-        except TelegramError:
+            await bot.pin_chat_message(
+                chat_id=chat_id,
+                message_id=message_id,
+                disable_notification=True,
+            )
+        except TelegramAPIError:
             logger.exception("Failed to pin message %s", message_id)
 
     def _start_background_task(self, coro: Coroutine[Any, Any, None], name: str) -> None:
         task = asyncio.create_task(coro, name=name)
-        self._background_tasks.append(task)
+        self._background_tasks.add(task)
 
         def _log_task_result(fut: asyncio.Task[None]) -> None:
+            self._background_tasks.discard(fut)
             try:
                 fut.result()
             except asyncio.CancelledError:
@@ -177,25 +166,19 @@ class IMOEXBotService:
 
         task.add_done_callback(_log_task_result)
 
-    async def _background_price_loop(self, application: Application) -> None:
+    async def _background_price_loop(self, bot: Bot) -> None:
         while True:
-            await self._perform_price_update(application)
+            await self._perform_price_update(bot)
             await asyncio.sleep(self.settings.price_update_interval)
 
-    async def _background_chart_loop(self, application: Application) -> None:
+    async def _background_chart_loop(self, bot: Bot) -> None:
         # Start updates only after the first interval to mimic job queue behaviour
         await asyncio.sleep(self.settings.chart_update_interval)
         while True:
-            await self._perform_chart_update(application)
+            await self._perform_chart_update(bot)
             await asyncio.sleep(self.settings.chart_update_interval)
 
-    async def _price_job(self, context: ContextTypes.DEFAULT_TYPE) -> None:
-        await self._perform_price_update(context.application)
-
-    async def _chart_job(self, context: ContextTypes.DEFAULT_TYPE) -> None:
-        await self._perform_chart_update(context.application)
-
-    async def _perform_price_update(self, application: Application) -> None:
+    async def _perform_price_update(self, bot: Bot) -> None:
         try:
             timestamp, value = await asyncio.to_thread(self.fetcher.fetch_last_value)
         except Exception:
@@ -209,35 +192,35 @@ class IMOEXBotService:
             self.storage.save()
 
             await self._update_price_message(
-                self._format_price_message(timestamp, value), application
+                self._format_price_message(timestamp, value), bot
             )
-            await self._handle_alert(timestamp, value, application)
+            await self._handle_alert(timestamp, value, bot)
 
-    async def _perform_chart_update(self, application: Application) -> None:
+    async def _perform_chart_update(self, bot: Bot) -> None:
         async with self._lock:
             try:
-                await self._update_chart_message(application)
+                await self._update_chart_message(bot)
             except Exception:
                 logger.exception("Failed to update chart message")
 
-    async def _update_price_message(self, text: str, application: Application) -> None:
+    async def _update_price_message(self, text: str, bot: Bot) -> None:
         message_id = self.storage.state.price_message_id
         if message_id is None:
             return
         if text == self._last_price_text:
             return
         try:
-            await application.bot.edit_message_text(
+            await bot.edit_message_text(
                 chat_id=self.settings.chat_id,
                 message_id=message_id,
                 text=text,
                 parse_mode=ParseMode.HTML,
             )
             self._last_price_text = text
-        except TelegramError:
+        except TelegramAPIError:
             logger.exception("Failed to edit price message")
 
-    async def _update_chart_message(self, application: Application) -> None:
+    async def _update_chart_message(self, bot: Bot) -> None:
         state = self.storage.state
         message_id = state.chart_message_id
         if message_id is None:
@@ -257,12 +240,12 @@ class IMOEXBotService:
             caption=self._build_chart_caption(recent_points),
         )
         try:
-            await application.bot.edit_message_media(
+            await bot.edit_message_media(
                 chat_id=self.settings.chat_id,
                 message_id=message_id,
                 media=media,
             )
-        except TelegramError:
+        except TelegramAPIError:
             logger.exception("Failed to edit chart message")
 
     @staticmethod
@@ -299,7 +282,7 @@ class IMOEXBotService:
         )
 
     async def _handle_alert(
-        self, timestamp: datetime, value: float, application: Application
+        self, timestamp: datetime, value: float, bot: Bot
     ) -> None:
         async with self._alert_lock:
             self._alert_history.append((timestamp, value))
@@ -316,23 +299,26 @@ class IMOEXBotService:
 
             direction = "Рост" if diff > 0 else "Падение"
             arrow = "🚀" if diff > 0 else "📉"
-            message = await application.bot.send_message(
+            message = await bot.send_message(
                 chat_id=self.settings.chat_id,
                 text=(
                     f"{arrow} {direction} индекса на {diff:+.2f} пунктов за минуту!\n"
                     f"Текущее значение: {value:.2f}"
                 ),
             )
-            asyncio.create_task(self._delete_message_later(application, message.message_id))
+            self._start_background_task(
+                self._delete_message_later(bot, message.message_id),
+                f"delete-alert-{message.message_id}",
+            )
             self._alert_history.clear()
 
-    async def _delete_message_later(self, application: Application, message_id: int) -> None:
+    async def _delete_message_later(self, bot: Bot, message_id: int) -> None:
         await asyncio.sleep(3600)
         try:
-            await application.bot.delete_message(
+            await bot.delete_message(
                 chat_id=self.settings.chat_id, message_id=message_id
             )
-        except TelegramError:
+        except TelegramAPIError:
             logger.warning("Failed to delete alert message %s", message_id)
 
 

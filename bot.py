@@ -1,12 +1,26 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import sys
 
-from telegram.ext import Application
+from aiogram import Bot, Dispatcher
+from aiogram.enums import ParseMode
 
 from imoex_bot.config import Settings, SettingsError
 from imoex_bot.service import IMOEXBotService
+
+
+async def _run_bot(settings: Settings) -> None:
+    service = IMOEXBotService(settings)
+
+    bot = Bot(token=settings.bot_token, parse_mode=ParseMode.HTML)
+    dp = Dispatcher()
+
+    dp.startup.register(service.on_startup)
+    dp.shutdown.register(service.on_shutdown)
+
+    await dp.start_polling(bot)
 
 
 def main() -> None:
@@ -21,11 +35,7 @@ def main() -> None:
         logging.error("%s", exc)
         sys.exit(1)
 
-    service = IMOEXBotService(settings)
-    application = Application.builder().token(settings.bot_token).build()
-    application.post_init = service.post_init
-    application.post_shutdown = service.post_shutdown
-    application.run_polling(stop_signals=None)
+    asyncio.run(_run_bot(settings))
 
 
 if __name__ == "__main__":
