@@ -4,9 +4,9 @@ import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 from io import BytesIO
-from typing import List, Tuple
+from typing import Any, Coroutine, List, Tuple
 
-from telegram import InputFile, InputMediaPhoto
+from telegram import BufferedInputFile, InputMediaPhoto
 from telegram.constants import ParseMode
 from telegram.error import TelegramError
 from telegram.ext import Application, ContextTypes
@@ -26,6 +26,7 @@ class IMOEXBotService:
         self.fetcher = IMOEXFetcher(settings.board, settings.security)
         self._lock = asyncio.Lock()
         self._alert_lock = asyncio.Lock()
+        self._background_tasks: list[asyncio.Task[None]] = []
         self._alert_history: List[Tuple[datetime, float]] = []
 
     async def post_init(self, application: Application) -> None:
@@ -37,21 +38,37 @@ class IMOEXBotService:
         await self._update_chart_message(application)
 
         job_queue = application.job_queue
-        job_queue.run_repeating(
-            self._price_job,
-            interval=self.settings.price_update_interval,
-            first=0.0,
-            name="price-updater",
-        )
-        job_queue.run_repeating(
-            self._chart_job,
-            interval=self.settings.chart_update_interval,
-            first=self.settings.chart_update_interval,
-            name="chart-updater",
-        )
+        if job_queue is not None:
+            job_queue.run_repeating(
+                self._price_job,
+                interval=self.settings.price_update_interval,
+                first=0.0,
+                name="price-updater",
+            )
+            job_queue.run_repeating(
+                self._chart_job,
+                interval=self.settings.chart_update_interval,
+                first=self.settings.chart_update_interval,
+                name="chart-updater",
+            )
+        else:
+            logger.warning(
+                "Job queue is not available. Falling back to asyncio tasks for updates."
+            )
+            self._start_background_task(
+                self._background_price_loop(application), "price-updater"
+            )
+            self._start_background_task(
+                self._background_chart_loop(application), "chart-updater"
+            )
 
     async def post_shutdown(self, application: Application) -> None:  # pragma: no cover
         self.storage.save()
+        for task in self._background_tasks:
+            task.cancel()
+        if self._background_tasks:
+            await asyncio.gather(*self._background_tasks, return_exceptions=True)
+        self._background_tasks.clear()
 
     async def _prepare_history(self) -> None:
         state = self.storage.state
@@ -115,7 +132,7 @@ class IMOEXBotService:
             placeholder = await self._build_placeholder_chart()
             message = await bot.send_photo(
                 chat_id=chat_id,
-                photo=placeholder,
+                photo=self._to_buffered_input_file(placeholder),
                 caption="Обновляю график…",
             )
             state.chart_message_id = message.message_id
@@ -143,7 +160,39 @@ class IMOEXBotService:
         except TelegramError:
             logger.exception("Failed to pin message %s", message_id)
 
+    def _start_background_task(self, coro: Coroutine[Any, Any, None], name: str) -> None:
+        task = asyncio.create_task(coro, name=name)
+        self._background_tasks.append(task)
+
+        def _log_task_result(fut: asyncio.Task[None]) -> None:
+            try:
+                fut.result()
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                logger.exception("Background task %s failed", name)
+
+        task.add_done_callback(_log_task_result)
+
+    async def _background_price_loop(self, application: Application) -> None:
+        while True:
+            await self._perform_price_update(application)
+            await asyncio.sleep(self.settings.price_update_interval)
+
+    async def _background_chart_loop(self, application: Application) -> None:
+        # Start updates only after the first interval to mimic job queue behaviour
+        await asyncio.sleep(self.settings.chart_update_interval)
+        while True:
+            await self._perform_chart_update(application)
+            await asyncio.sleep(self.settings.chart_update_interval)
+
     async def _price_job(self, context: ContextTypes.DEFAULT_TYPE) -> None:
+        await self._perform_price_update(context.application)
+
+    async def _chart_job(self, context: ContextTypes.DEFAULT_TYPE) -> None:
+        await self._perform_chart_update(context.application)
+
+    async def _perform_price_update(self, application: Application) -> None:
         try:
             timestamp, value = await asyncio.to_thread(self.fetcher.fetch_last_value)
         except Exception:
@@ -156,13 +205,15 @@ class IMOEXBotService:
             state.prune_history(timedelta(hours=6))
             self.storage.save()
 
-            await self._update_price_message(self._format_price_message(timestamp, value), context.application)
-            await self._handle_alert(timestamp, value, context.application)
+            await self._update_price_message(
+                self._format_price_message(timestamp, value), application
+            )
+            await self._handle_alert(timestamp, value, application)
 
-    async def _chart_job(self, context: ContextTypes.DEFAULT_TYPE) -> None:
+    async def _perform_chart_update(self, application: Application) -> None:
         async with self._lock:
             try:
-                await self._update_chart_message(context.application)
+                await self._update_chart_message(application)
             except Exception:
                 logger.exception("Failed to update chart message")
 
@@ -196,7 +247,7 @@ class IMOEXBotService:
 
         chart = await asyncio.to_thread(build_chart, recent_points)
         media = InputMediaPhoto(
-            media=InputFile(chart, filename="imoex_chart.png"),
+            media=self._to_buffered_input_file(chart),
             caption=self._build_chart_caption(recent_points),
         )
         try:
@@ -207,6 +258,12 @@ class IMOEXBotService:
             )
         except TelegramError:
             logger.exception("Failed to edit chart message")
+
+    @staticmethod
+    def _to_buffered_input_file(buffer: BytesIO) -> BufferedInputFile:
+        buffer.seek(0)
+        data = buffer.getvalue()
+        return BufferedInputFile(data, filename="imoex_chart.png")
 
     def _build_chart_caption(self, points: List[Tuple[datetime, float]]) -> str:
         start_time = points[0][0].astimezone(MOSCOW_TZ)
