@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Iterable, List, Tuple
+from typing import Iterable, List, Optional, Sequence, Tuple
 
 import requests
 from zoneinfo import ZoneInfo
@@ -26,6 +26,44 @@ class IMOEXFetcher:
         self._session = requests.Session()
         self._session.headers.update({"User-Agent": "imoex-bot/1.0"})
 
+    @staticmethod
+    def _find_column_index(
+        columns: Sequence[str],
+        candidates: Sequence[str],
+        *,
+        required: bool = True,
+    ) -> Tuple[Optional[int], Optional[str]]:
+        for name in candidates:
+            try:
+                return columns.index(name), name
+            except ValueError:
+                continue
+        if required:
+            raise RuntimeError(
+                "Unexpected response structure from MOEX ISS: missing columns "
+                + ", ".join(candidates)
+            )
+        return None, None
+
+    @staticmethod
+    def _to_utc_timestamp(value: object) -> datetime:
+        if isinstance(value, datetime):
+            dt = value
+        elif isinstance(value, str) and value.strip():
+            systime_clean = value.replace("T", " ").strip()
+            try:
+                dt = datetime.fromisoformat(systime_clean)
+            except ValueError:
+                raise RuntimeError(
+                    "Unexpected timestamp format received from MOEX ISS"
+                ) from None
+        else:
+            raise RuntimeError("Timestamp value is missing in ISS response")
+
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=MOSCOW_TZ)
+        return dt.astimezone(timezone.utc)
+
     def fetch_last_value(self) -> Tuple[datetime, float]:
         url = f"{self.BASE_URL}/engines/stock/markets/index/boards/{self.board}/securities.json"
         params = {"securities": self.security, "iss.meta": "off"}
@@ -38,12 +76,28 @@ class IMOEXFetcher:
         if not data_rows:
             raise RuntimeError("No market data received from MOEX ISS")
 
-        try:
-            secid_idx = columns.index("SECID")
-            last_idx = columns.index("LAST")
-            time_idx = columns.index("SYSTIME")
-        except ValueError as exc:
-            raise RuntimeError("Unexpected response structure from MOEX ISS") from exc
+        secid_idx, _ = self._find_column_index(columns, ["SECID"])
+        last_idx, last_column = self._find_column_index(
+            columns,
+            [
+                "LAST",
+                "LASTVALUE",
+                "CURRENTVALUE",
+                "LASTPRICE",
+                "VALUE",
+            ],
+        )
+        time_idx, _ = self._find_column_index(
+            columns,
+            [
+                "SYSTIME",
+                "TIME",
+                "UPDATETIME",
+                "DATETIME",
+                "LASTCHANGE",
+            ],
+            required=False,
+        )
 
         matching_rows: Iterable[List] = (
             row for row in data_rows if row[secid_idx] == self.security
@@ -54,17 +108,20 @@ class IMOEXFetcher:
             raise RuntimeError(f"Security {self.security} not found in response") from exc
 
         last_value = row[last_idx]
-        systime_raw = row[time_idx]
+        systime_raw = row[time_idx] if time_idx is not None else None
+
         if last_value is None:
-            raise RuntimeError("LAST value is missing in ISS response")
-        if systime_raw is None:
+            raise RuntimeError(
+                f"{last_column or 'LAST'} value is missing in ISS response"
+            )
+
+        if systime_raw in (None, ""):
             timestamp = datetime.now(timezone.utc)
         else:
-            systime_clean = systime_raw.replace("T", " ")
-            dt = datetime.fromisoformat(systime_clean)
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=MOSCOW_TZ)
-            timestamp = dt.astimezone(timezone.utc)
+            try:
+                timestamp = self._to_utc_timestamp(systime_raw)
+            except RuntimeError:
+                timestamp = datetime.now(timezone.utc)
 
         return timestamp, float(last_value)
 
