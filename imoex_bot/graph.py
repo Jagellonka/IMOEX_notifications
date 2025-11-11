@@ -17,7 +17,7 @@ def build_chart(points: Sequence[Tuple[datetime, float]]) -> BytesIO:
     times = [ts.astimezone(timezone.utc) for ts, _ in points]
     values = [value for _, value in points]
 
-    fig, ax = plt.subplots(figsize=(10, 5), layout="constrained")
+    fig, ax = plt.subplots(figsize=(10, 5))
     ax.plot(times, values, color="#003f5c", linewidth=2)
 
     min_value = min(values)
@@ -32,6 +32,7 @@ def build_chart(points: Sequence[Tuple[datetime, float]]) -> BytesIO:
     ax.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
     ax.xaxis.set_major_locator(mdates.AutoDateLocator(maxticks=8))
     fig.autofmt_xdate()
+    fig.tight_layout()
 
     buffer = BytesIO()
     fig.savefig(buffer, format="png", dpi=200)

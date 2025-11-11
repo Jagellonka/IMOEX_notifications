@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from typing import Any, Coroutine, List, Tuple
 
-from telegram import InputFile, InputMediaPhoto
+from telegram import BufferedInputFile, InputMediaPhoto
 from telegram.constants import ParseMode
 from telegram.error import TelegramError
 from telegram.ext import Application, ContextTypes
@@ -266,10 +266,10 @@ class IMOEXBotService:
             logger.exception("Failed to edit chart message")
 
     @staticmethod
-    def _to_input_file(buffer: BytesIO) -> InputFile:
+    def _to_input_file(buffer: BytesIO) -> BufferedInputFile:
         buffer.seek(0)
-        data = buffer.getvalue()
-        return InputFile(data, filename="imoex_chart.png")
+        data = buffer.read()
+        return BufferedInputFile(data, filename="imoex_chart.png")
 
     def _build_chart_caption(self, points: List[Tuple[datetime, float]]) -> str:
         start_time = points[0][0].astimezone(MOSCOW_TZ)
