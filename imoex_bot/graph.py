@@ -41,9 +41,10 @@ def build_chart(
     ax.xaxis.set_major_locator(mdates.AutoDateLocator(maxticks=8))
     fig.autofmt_xdate()
     if summary is not None:
-        _add_summary_inset(ax, summary)
-
-    fig.tight_layout()
+        fig.tight_layout(rect=[0.0, 0.0, 0.74, 1.0])
+        _add_summary_panel(ax, summary)
+    else:
+        fig.tight_layout()
 
     buffer = BytesIO()
     fig.savefig(buffer, format="png", dpi=200)
@@ -52,22 +53,23 @@ def build_chart(
     return buffer
 
 
-def _add_summary_inset(ax: Axes, summary: DaySummary) -> None:
-    inset = ax.inset_axes([0.63, 0.08, 0.33, 0.42])
-    inset.set_facecolor("#f8f9fb")
-    inset.set_xticks([])
-    inset.set_yticks([])
-    inset.set_xlim(0, 1)
-    inset.set_ylim(0, 1)
+def _add_summary_panel(ax: Axes, summary: DaySummary) -> None:
+    fig = ax.figure
+    panel = fig.add_axes([0.76, 0.18, 0.22, 0.62])
+    panel.set_facecolor("#f8f9fb")
+    panel.set_xticks([])
+    panel.set_yticks([])
+    panel.set_xlim(0, 1)
+    panel.set_ylim(0, 1)
 
-    for spine in inset.spines.values():
+    for spine in panel.spines.values():
         spine.set_edgecolor("#003f5c")
         spine.set_linewidth(0.8)
         spine.set_alpha(0.4)
 
-    inset.text(
+    panel.text(
         0.5,
-        0.95,
+        0.93,
         "Дневная свеча",
         ha="center",
         va="center",
@@ -85,12 +87,12 @@ def _add_summary_inset(ax: Axes, summary: DaySummary) -> None:
     spread = max(high - low, 1e-6)
 
     def scale(value: float) -> float:
-        return 0.15 + 0.7 * (value - low) / spread
+        return 0.18 + 0.64 * (value - low) / spread
 
     wick_y_bottom = scale(low)
     wick_y_top = scale(high)
-    inset.plot(
-        [0.2, 0.2],
+    panel.plot(
+        [0.18, 0.18],
         [wick_y_bottom, wick_y_top],
         color=body_color,
         linewidth=2,
@@ -102,8 +104,8 @@ def _add_summary_inset(ax: Axes, summary: DaySummary) -> None:
     if body_height < 0.02:
         body_height = 0.02
     candle_body = patches.Rectangle(
-        (0.2 - 0.06, body_bottom),
-        0.12,
+        (0.18 - 0.055, body_bottom),
+        0.11,
         body_height,
         facecolor=body_color,
         edgecolor=body_color,
@@ -111,7 +113,7 @@ def _add_summary_inset(ax: Axes, summary: DaySummary) -> None:
         alpha=0.9,
         zorder=3,
     )
-    inset.add_patch(candle_body)
+    panel.add_patch(candle_body)
 
     labels = [
         ("Открытие", open_),
@@ -121,8 +123,8 @@ def _add_summary_inset(ax: Axes, summary: DaySummary) -> None:
     ]
     y = 0.78
     for title, value in labels:
-        inset.text(
-            0.38,
+        panel.text(
+            0.42,
             y,
             title,
             ha="left",
@@ -130,8 +132,8 @@ def _add_summary_inset(ax: Axes, summary: DaySummary) -> None:
             fontsize=9,
             color="#4a4a4a",
         )
-        inset.text(
-            0.95,
+        panel.text(
+            0.96,
             y,
             f"{value:.2f}",
             ha="right",

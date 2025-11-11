@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 
 
 MOSCOW_TZ = ZoneInfo("Europe/Moscow")
+UTC_TZ = timezone.utc
 
 
 @dataclass(slots=True)
@@ -70,7 +71,9 @@ class IMOEXFetcher:
 
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=MOSCOW_TZ)
-        return dt.astimezone(timezone.utc)
+        else:
+            dt = dt.astimezone(MOSCOW_TZ)
+        return dt.astimezone(UTC_TZ)
 
     def fetch_last_value(self) -> Tuple[datetime, float]:
         url = f"{self.BASE_URL}/engines/stock/markets/index/boards/{self.board}/securities.json"
@@ -258,8 +261,13 @@ class IMOEXFetcher:
             close_idx = columns.index("close")
 
             for row in data_rows:
-                ts = datetime.strptime(row[begin_idx], "%Y-%m-%d %H:%M:%S")
-                ts = ts.replace(tzinfo=MOSCOW_TZ).astimezone(timezone.utc)
+                ts_value = row[begin_idx]
+                ts = datetime.fromisoformat(ts_value)
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=MOSCOW_TZ)
+                else:
+                    ts = ts.astimezone(MOSCOW_TZ)
+                ts = ts.astimezone(UTC_TZ)
                 close = float(row[close_idx])
                 candles.append(Candle(timestamp=ts, close=close))
 
